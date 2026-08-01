@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+*.log
+.DS_Store
+**/.DS_Store
+rls-guard-setup-guide.docx
+~$*.docx
+rls-guard.generated.sql

@@ -1,0 +1,44 @@
+# Example rls-guard permission spec.
+# This describes INTENDED access rules in plain terms — rls-guard turns this into
+# real Postgres RLS policies (`generate`) or checks a live database against it (`audit`).
+
+roles:
+  - name: anon
+    description: Unauthenticated visitor (Supabase anon key)
+  - name: authenticated
+    description: Any logged-in user
+  - name: admin
+    description: Staff with full access across all tables
+
+tables:
+  posts:
+    owner_column: user_id
+    rules:
+      select: [authenticated]          # any logged-in user can read posts
+      insert: [authenticated]          # any logged-in user can create their own post
+      update: [owner, admin]           # only the author or an admin can edit
+      delete: [owner, admin]           # only the author or an admin can delete
+    cascade:
+      on_delete_of: users              # if the author's user row is deleted...
+      action: cascade                  # ...delete their posts too
+
+  comments:
+    owner_column: user_id
+    rules:
+      select: [authenticated]
+      insert: [authenticated]
+      update: [owner]
+      delete: [owner, admin]
+    cascade:
+      on_delete_of: posts               # if the parent post is deleted...
+      action: cascade                   # ...delete its comments too
+
+  audit_logs:
+    rules:
+      select: [admin]                   # nobody but admins can read audit logs
+      insert: [authenticated]           # the app writes logs on behalf of any user
+      update: []                        # nobody can edit a log entry
+      delete: []                        # nobody can delete a log entry, ever
+    cascade:
+      on_delete_of: users
+      action: set_null                  # keep the log row, just null out the user reference
