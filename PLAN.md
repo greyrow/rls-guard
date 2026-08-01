@@ -42,6 +42,67 @@ below is what's already built, and what to do next when you continue this in Cla
 - No CI/GitHub Action yet — that's the planned paid-tier hook, intentionally not built
   as part of the free core so the free/paid boundary stays clean from the start.
 
+## v2: whole-app scan feature (phase 1 done, phases 2-5 next)
+
+Extends rls-guard from "audit the database" to "audit CRUD+RLS coverage across the
+whole app," ending in a single HTML tracker + an interactive Claude Code remediation
+loop. Built in phases so each one ships independently:
+
+**Phase 1 — done (this session).** App-code CRUD scanner + cross-reference:
+- `src/tools/appScan.ts` — regex-based scan (via `fast-glob`) for Supabase-client CRUD
+  call sites (`.from('table').select/insert/update/delete/upsert(...)`) in an app's
+  `.ts/.tsx/.js/.jsx` files. Same heuristic tradeoff as the existing baseline audit —
+  no AST, will miss dynamic table names (`.from(tableVar)`).
+- `src/tools/crossReference.ts` — cross-references call sites against `LiveSchema`
+  (RLS on/off, policy exists for the action, policy is unrestricted) and, if `--spec`
+  is given, against the intended `AppSpec`. Produces `AppCrudFinding[]`: risk level
+  (critical/high/medium/low), urgency (now/this_week/backlog), plain-English summary +
+  recommendation, and the call sites that triggered it.
+- `src/types.ts` — added `AppCrudCallSite`, `AppCrudFinding`, `AppScanReport`,
+  `RiskLevel`, `Urgency`.
+- `src/index.ts` — new `scan --app <dir> --db <url> [--spec <path>] [--out <path>]`
+  command. Writes `rls-guard.scan.json` (the full findings list) and prints a console
+  summary + critical/high findings inline. Exits non-zero if any critical/high finding.
+
+**First things to do in Claude Code for phase 1:**
+1. `npm install` — this adds `fast-glob` as a new dependency, not yet installed/verified
+   (this code was written in a sandbox with no npm registry access — build/typecheck it
+   first).
+2. Run `scan` against a real or throwaway Supabase app directory and sanity-check the
+   findings against what you know is actually true about that app's RLS setup.
+3. Write unit tests for `crossReference` (pure function, easiest coverage) covering each
+   risk-level branch — RLS off, no policy for action, unrestricted policy, spec mismatch,
+   clean/low.
+4. Known gap: call-site → CRUD-method attribution is a fixed-size lookahead window
+   (300 chars) from each `.from(...)`, not a real parse — long chains or unusual
+   formatting could misattribute. Worth a few adversarial test fixtures.
+
+**Phase 2 — HTML tracker report.** Render `AppScanReport` (the JSON from phase 1) as a
+single portable HTML file: findings grouped/sorted by risk, checkboxes per finding.
+Important constraint already flagged in review: static HTML can't persist checkbox
+state on its own (no server) — so the actual source of truth stays the JSON/YAML report
+file, and the HTML either (a) re-generates from an updated JSON each time an item is
+resolved, or (b) uses `localStorage` for local-only "I've reviewed this" state that
+doesn't survive across machines. Decide which before building; (a) is more consistent
+with "JSON is the source of truth."
+
+**Phase 3 — `--create-issue`.** New flag/command that takes an `AppScanReport` and opens
+a GitHub issue via `gh issue create` with a markdown checklist mirroring the findings
+(one checkbox per finding, grouped by risk level, linking back to file:line call sites).
+
+**Phase 4 — `ship start` remediation loop (deferred, hardest/most novel).** Interactive
+Claude Code command: pick the next unchecked item from the issue, explain it in plain
+English, take user approval/adjustments/rejection, implement the fix, commit + push +
+open a PR, then mark the issue checkbox and the JSON/HTML tracker done with a comment
+explaining what changed. All git/GitHub operations via explicit `gh`/`git` script
+commands (no ambient auto-commit). Still open: whether this ships as a `gh extension`
+(installable in any repo) or a command inside this same TypeScript CLI — leaning CLI
+command for now, since it needs to share types/logic with `scan` directly.
+
+**Phase 5 — branch/merge automation (deferred, lowest risk).** If the repo has a
+`develop` branch, target PRs there instead of `main`, then a separate explicit
+`gh`-scripted merge-to-main step; archive the remediation session once merged.
+
 ## Before pushing to GitHub
 
 - Double check `.env` is gitignored (it is) and never commit a real `DATABASE_URL` or key.

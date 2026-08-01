@@ -7,6 +7,9 @@ import { introspectSchema } from "./tools/schema.js";
 import { generatePolicySql, auditAgainstSpec } from "./tools/claude.js";
 import { runBaselineChecks } from "./tools/baselineAudit.js";
 import { dryRunSql } from "./tools/validate.js";
+import { scanAppCode } from "./tools/appScan.js";
+import { crossReference } from "./tools/crossReference.js";
+import type { AppScanReport, RiskLevel } from "./types.js";
 
 const program = new Command();
 
@@ -93,6 +96,75 @@ program
       console.log("\n" + report);
     } else if (!opts.spec) {
       console.log(`\nPass --spec <path> to also compare against your intended permission spec.`);
+    }
+  });
+
+program
+  .command("scan")
+  .description(
+    "Scan an app's codebase for Supabase CRUD call sites and cross-reference them against live RLS state — a whole-app coverage audit, not just the database."
+  )
+  .requiredOption("-a, --app <path>", "path to the app directory to scan")
+  .requiredOption("-d, --db <url>", "Postgres connection string")
+  .option("-s, --spec <path>", "path to the YAML permission spec (optional — enables spec-mismatch findings)")
+  .option("-o, --out <path>", "output file for the JSON scan report", "rls-guard.scan.json")
+  .action(async (opts: { app: string; db: string; spec?: string; out: string }) => {
+    console.log(`Scanning ${opts.app} for Supabase CRUD call sites...`);
+    const callSites = await scanAppCode(opts.app);
+    console.log(`Found ${callSites.length} call site(s).`);
+    if (callSites.length === 0) {
+      console.log(
+        "No .from(...).select/insert/update/delete(...) call sites found. If this app uses Supabase, check that --app points at the right directory."
+      );
+    }
+
+    console.log("Introspecting live schema...");
+    const liveSchema = await introspectSchema(opts.db);
+
+    const spec = opts.spec ? await loadSpec(opts.spec) : null;
+
+    const findings = crossReference(callSites, liveSchema, spec);
+
+    const summary: Record<RiskLevel, number> = { critical: 0, high: 0, medium: 0, low: 0 };
+    for (const f of findings) summary[f.riskLevel]++;
+
+    let databaseName = "unknown";
+    try {
+      databaseName = new URL(opts.db).pathname.replace(/^\//, "") || "unknown";
+    } catch {
+      // best-effort only — a report with "unknown" here is still useful.
+    }
+
+    const report: AppScanReport = {
+      generatedAt: new Date().toISOString(),
+      appDir: opts.app,
+      databaseName,
+      findings,
+      summary,
+    };
+
+    await writeFile(opts.out, JSON.stringify(report, null, 2) + "\n", "utf8");
+    console.log(`\nWrote ${opts.out}`);
+
+    console.log(`\n== Summary ==`);
+    console.log(`${summary.critical} critical, ${summary.high} high, ${summary.medium} medium, ${summary.low} informational`);
+
+    for (const f of findings.filter((f) => f.riskLevel === "critical" || f.riskLevel === "high")) {
+      console.log(`\n[${f.riskLevel.toUpperCase()}] ${f.table}.${f.action}`);
+      console.log(`  ${f.summary}`);
+      console.log(`  Fix: ${f.recommendation}`);
+      console.log(`  Found at: ${f.callSites.map((c) => `${c.file}:${c.line}`).join(", ")}`);
+    }
+
+    if (!opts.spec) {
+      console.log(`\nPass --spec <path> to also flag call sites that don't match your intended permission spec.`);
+    }
+
+    if (summary.critical > 0 || summary.high > 0) {
+      console.log(`\n${opts.out} has the full findings list, including medium/low. Review before shipping.`);
+      process.exitCode = 1;
+    } else {
+      console.log(`\nNo critical or high-risk findings. ${opts.out} has the full list for reference.`);
     }
   });
 

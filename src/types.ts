@@ -75,3 +75,54 @@ export interface LiveTable {
 export interface LiveSchema {
   tables: LiveTable[];
 }
+
+/**
+ * Types for the "scan" feature: auditing CRUD+RLS coverage across an entire
+ * app's codebase, not just the database. A scan finds every Supabase-client
+ * CRUD call site in app code, cross-references it against live RLS state
+ * (and, optionally, the intended permission spec), and produces risk-rated,
+ * plain-English findings — the source data for the HTML tracker report.
+ */
+
+export type RiskLevel = "critical" | "high" | "medium" | "low";
+
+export type Urgency = "now" | "this_week" | "backlog";
+
+/** One place in app code where a CRUD action is performed against a table. */
+export interface AppCrudCallSite {
+  /** File path, relative to the scanned app directory. */
+  file: string;
+  line: number;
+  table: string;
+  action: CrudAction;
+  /** Short source snippet for context in the report (not a full statement). */
+  raw: string;
+}
+
+/** A single risk-rated finding for one table + CRUD action, across all its call sites. */
+export interface AppCrudFinding {
+  table: string;
+  action: CrudAction;
+  riskLevel: RiskLevel;
+  urgency: Urgency;
+  /** One-line plain-English description of what was found. */
+  summary: string;
+  /** Plain-English suggested fix. */
+  recommendation: string;
+  callSites: AppCrudCallSite[];
+  evidence: {
+    rlsEnabled: boolean;
+    hasPolicyForAction: boolean;
+    policyUsesUnrestrictedUsing: boolean;
+    /** undefined if no spec was given, or the table isn't covered by the spec. */
+    specAllowsAction?: boolean;
+  };
+}
+
+export interface AppScanReport {
+  generatedAt: string;
+  appDir: string;
+  databaseName: string;
+  findings: AppCrudFinding[];
+  summary: Record<RiskLevel, number>;
+}

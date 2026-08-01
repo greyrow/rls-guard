@@ -53,6 +53,22 @@ npx tsx src/index.ts audit --db $DATABASE_URL --spec spec/example.spec.yaml
 See `spec/example.spec.yaml` for the spec format: roles, per-table CRUD rules, and
 cascade-delete behavior (`cascade` / `restrict` / `set_null`).
 
+Scan an app's codebase for every Supabase CRUD call site (`.from('table').select/insert/
+update/delete(...)`) and cross-reference each one against live RLS state — catches gaps
+`audit` alone can't see, like app code that calls `.update()` on a table with no UPDATE
+policy at all (which fails at runtime), or writes that quietly hit an unrestricted policy:
+
+```bash
+npx tsx src/index.ts scan --app ./src --db $DATABASE_URL
+npx tsx src/index.ts scan --app ./src --db $DATABASE_URL --spec spec/example.spec.yaml
+```
+
+Writes a JSON report (`rls-guard.scan.json` by default) with every finding, risk level
+(`critical`/`high`/`medium`/`low`), urgency, and a plain-English recommendation — the
+source data for the HTML tracker report and `--create-issue` GitHub checklist planned
+next (see `PLAN.md`). Same heuristic tradeoff as `audit --no-ai`: regex-based call-site
+detection, not an AST parse — treat findings as "worth reviewing," not exhaustive.
+
 ## How it's different
 
 Most existing tools here are either general-purpose policy engines you write yourself
