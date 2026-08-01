@@ -108,9 +108,42 @@ would fork into silently-disagreeing copies):
   become plain `.option()` with manual validation in the action, instead of
   `.requiredOption()`, so `scan resolve` isn't blocked by `scan`'s unrelated requirements.
 
-**Phase 3 — `--create-issue`.** New flag/command that takes an `AppScanReport` and opens
-a GitHub issue via `gh issue create` with a markdown checklist mirroring the findings
-(one checkbox per finding, grouped by risk level, linking back to file:line call sites).
+**Phase 3 — done.** `scan create-issue`, syncing the merged JSON report to a GitHub
+issue via the `gh` CLI (built as a subcommand alongside `scan resolve`, not a flag on
+`scan` — it only reads the existing report, doesn't need `--app`/`--db`, and can be
+re-run standalone e.g. to resync after a manual GitHub edit):
+- `src/tools/issueBody.ts` — pure markdown building: title (open-finding count, or "all
+  clear"), checklist grouped under Critical/High/Medium/Low headings (only `status:
+  "open"` findings become `- [ ]` lines), resolved/wontfix findings collapsed into a
+  `<details>` section for context instead of unchecked boxes. Two kinds of HTML-comment
+  markers, invisible in GitHub's rendered view: one tracker marker per issue
+  (`app=<appDir> db=<databaseName>`, so `create-issue` finds *its own* issue on a re-run
+  instead of creating a duplicate, and multiple app/db targets in one repo get separate
+  issues) and one per-finding marker (`table=<table> action=<action>`) right after each
+  checklist line, so a later tool can map a checked box back to a specific finding
+  without parsing prose — not built yet, just not painted into a corner.
+- `src/tools/githubIssue.ts` — thin `gh` CLI wrapper (`execFile` with argv arrays, no
+  shell, so finding text can never be interpreted as shell syntax; body content always
+  goes through a temp `--body-file`, not a CLI argument). Finds the tracker issue by
+  listing all issues (`--state all`, not GitHub's search API, to avoid depending on
+  search-index timing) and filtering client-side for the marker.
+- `src/tools/issueSync.ts` — `planIssueSync(hasOpenFindings, existingIssue)` is the pure
+  decision matrix (unit-tested on its own): no issue + no open findings → skip; no issue
+  + open findings → create; existing issue open + no open findings → update and close;
+  existing issue closed + open findings → update and reopen (this fires identically
+  whether *we* closed it last time or a human closed it manually via the GitHub UI — the
+  JSON is the source of truth, so a stale closed issue is out of sync, not an override);
+  otherwise just update the body/title in place.
+- Verified live against a throwaway private repo (`greyrow/rls-guard-scan-test`), not
+  just fixtures: create → re-run (no duplicate) → all-resolved (closes) → finding
+  reopens while issue closed (reopens, with comment) → manually closed via `gh issue
+  close` while findings are still open (reopens the same way) → manually closed with no
+  open findings (stays closed, body still refreshes) → a second app/db target with zero
+  open findings and no existing issue (correctly creates nothing). All six state
+  transitions matched the decision matrix exactly — no bugs found in this phase's own
+  logic, unlike phases 1-2 (the `gh` CLI's exact flags for `reopen`/`close`/`edit`
+  body-file support were checked via `--help` before writing the code, which is likely
+  why).
 
 **Phase 4 — `ship start` remediation loop (deferred, hardest/most novel).** Interactive
 Claude Code command: pick the next unchecked item from the issue, explain it in plain

@@ -65,9 +65,9 @@ npx tsx src/index.ts scan --app ./src --db $DATABASE_URL --spec spec/example.spe
 
 Writes a JSON report (`rls-guard.scan.json` by default) with every finding, risk level
 (`critical`/`high`/`medium`/`low`), urgency, and a plain-English recommendation — the
-source data for the HTML tracker report and `--create-issue` GitHub checklist planned
-next (see `PLAN.md`). Same heuristic tradeoff as `audit --no-ai`: regex-based call-site
-detection, not an AST parse — treat findings as "worth reviewing," not exhaustive.
+source data for the HTML tracker report and the GitHub issue checklist below. Same
+heuristic tradeoff as `audit --no-ai`: regex-based call-site detection, not an AST parse
+— treat findings as "worth reviewing," not exhaustive.
 
 Add `--html` to also write a static HTML tracker (grouped by risk, with status badges):
 
@@ -89,6 +89,31 @@ npx tsx src/index.ts scan resolve --table posts --action select --status resolve
 The JSON file is always the source of truth — the HTML is a pure render of it and never
 holds state of its own (no checkboxes, no `localStorage`); regenerate it via `scan` or
 `scan resolve` rather than editing it by hand.
+
+Sync the report to a GitHub issue — a markdown checklist of open findings, grouped by
+risk level, using the `gh` CLI's own authentication (no separate credential setup):
+
+```bash
+npx tsx src/index.ts scan create-issue
+npx tsx src/index.ts scan create-issue --repo owner/repo   # target a specific repo
+```
+
+Re-running `create-issue` finds and updates its own tracker issue instead of creating a
+duplicate — it embeds a hidden marker (app dir + database name) in the issue body and
+searches existing issues for it, so scanning several apps/databases from one repo gets
+one tracking issue each, not a shared one. Resolved/won't-fix findings are shown in a
+collapsed section for context, not as checkboxes — only open findings get a `- [ ]` line.
+Each checklist line also carries a hidden per-finding marker (table+action) so a later
+tool can map a checked box back to a specific finding.
+
+The issue's open/closed state follows the report, not the other way around:
+- No open findings and no existing issue → nothing is created.
+- An open tracker issue with no open findings left → updated and **closed**.
+- A closed tracker issue that still has (or has new) open findings → updated and
+  **reopened** — including if a human closed it manually in the meantime. The JSON is
+  the source of truth, so a stale closed issue is treated as out of sync, not as an
+  override.
+- Otherwise, the body/title are just refreshed in place.
 
 Known gaps in the call-site scanner (confirmed against real fixtures, not just claimed):
 - **Dynamic table names are invisible, not warned about.** `.from(tableVar)` or a template

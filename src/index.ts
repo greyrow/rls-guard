@@ -12,6 +12,7 @@ import { scanAppCode } from "./tools/appScan.js";
 import { crossReference } from "./tools/crossReference.js";
 import { mergeScanReport, applyResolution, summarize } from "./tools/scanReport.js";
 import { renderScanReportHtml } from "./tools/renderHtml.js";
+import { syncScanIssue } from "./tools/issueSync.js";
 import type { AppScanReport, FindingStatus } from "./types.js";
 
 async function loadScanReport(reportPath: string): Promise<AppScanReport | null> {
@@ -274,6 +275,42 @@ scanCommand
 
     await writeScanReport(opts.report, updated, { renderHtmlIfExists: true });
     console.log(`Marked ${opts.table}.${opts.action} as "${opts.status}".`);
+  });
+
+scanCommand
+  .command("create-issue")
+  .description(
+    "Sync an existing scan report to a GitHub issue: a markdown checklist of open findings, grouped by risk level. Finds and updates its own tracker issue on repeat runs instead of creating duplicates."
+  )
+  .option("-r, --report <path>", "path to the JSON scan report", "rls-guard.scan.json")
+  .option("-R, --repo <owner/repo>", "target repo (defaults to gh's own detection from the git remote)")
+  .action(async (opts: { report: string; repo?: string }) => {
+    const report = await loadScanReport(opts.report);
+    if (!report) {
+      console.error(`${opts.report} doesn't exist yet — run "scan" first.`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const result = await syncScanIssue(report, opts.repo);
+
+    switch (result.action) {
+      case "skip":
+        console.log("No open findings and no existing tracker issue — nothing to create.");
+        break;
+      case "create":
+        console.log(`Created issue #${result.issueNumber}.`);
+        break;
+      case "update":
+        console.log(`Updated issue #${result.issueNumber}.`);
+        break;
+      case "update_and_close":
+        console.log(`Updated and closed issue #${result.issueNumber} — no open findings remain.`);
+        break;
+      case "update_and_reopen":
+        console.log(`Updated and reopened issue #${result.issueNumber} — it had been closed but open findings remain.`);
+        break;
+    }
   });
 
 program.parseAsync(process.argv);
