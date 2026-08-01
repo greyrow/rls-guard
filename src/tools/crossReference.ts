@@ -23,12 +23,29 @@ function policyCoversAction(table: LiveTable, action: CrudAction): boolean {
   return table.policies.some((p) => p.command === command || p.command === "ALL");
 }
 
+function isUnrestrictedExpr(expr: string | null): boolean {
+  return expr === null || expr.trim().toLowerCase() === "true";
+}
+
+/**
+ * Postgres never populates USING (qual) for a pure INSERT policy — CREATE POLICY
+ * disallows it, since there's no existing row to filter by. A FOR ALL policy checks
+ * WITH CHECK for inserts, falling back to USING only if WITH CHECK wasn't specified.
+ * Checking usingExpr alone for "insert" would flag every legitimate INSERT policy
+ * (restricted only via WITH CHECK) as unrestricted.
+ */
+function isPolicyUnrestrictedForAction(policy: { command: string; usingExpr: string | null; withCheckExpr: string | null }, action: CrudAction): boolean {
+  if (action === "insert") {
+    const check = policy.command === "INSERT" ? policy.withCheckExpr : policy.withCheckExpr ?? policy.usingExpr;
+    return isUnrestrictedExpr(check);
+  }
+  return isUnrestrictedExpr(policy.usingExpr);
+}
+
 function hasUnrestrictedPolicy(table: LiveTable, action: CrudAction): boolean {
   const command = action.toUpperCase();
   return table.policies.some(
-    (p) =>
-      (p.command === command || p.command === "ALL") &&
-      (p.usingExpr === null || p.usingExpr.trim().toLowerCase() === "true")
+    (p) => (p.command === command || p.command === "ALL") && isPolicyUnrestrictedForAction(p, action)
   );
 }
 
@@ -116,7 +133,15 @@ export function crossReference(
     } else {
       riskLevel = "low";
       urgency = "backlog";
-      summary = `App code calls .${action}() on "${table}" — RLS is on and a scoped ${action.toUpperCase()} policy covers it.${spec ? " Matches the permission spec." : ""}`;
+      // specAllows is only "false" via the branch above, so here it's either true
+      // (table + action are covered) or undefined (spec doesn't mention this table
+      // at all) — don't claim a spec match we didn't actually check.
+      const specNote = !spec
+        ? ""
+        : specAllows === true
+          ? " Matches the permission spec."
+          : " Table isn't covered by the permission spec — nothing to compare against.";
+      summary = `App code calls .${action}() on "${table}" — RLS is on and a scoped ${action.toUpperCase()} policy covers it.${specNote}`;
       recommendation = `No action needed — keep this as documented coverage in the tracker.`;
     }
 

@@ -69,6 +69,19 @@ source data for the HTML tracker report and `--create-issue` GitHub checklist pl
 next (see `PLAN.md`). Same heuristic tradeoff as `audit --no-ai`: regex-based call-site
 detection, not an AST parse — treat findings as "worth reviewing," not exhaustive.
 
+Known gaps in the call-site scanner (confirmed against real fixtures, not just claimed):
+- **Dynamic table names are invisible, not warned about.** `.from(tableVar)` or a template
+  literal with interpolation (`` .from(`app_${env}`) ``) produce zero call sites — the
+  scanner requires a quoted string literal. If your app builds table names dynamically,
+  `scan` will silently miss those call sites entirely.
+- **A CRUD method more than ~300 characters after its `.from(...)` is missed.** The
+  scanner only looks a fixed distance ahead in the same chain (long enough for realistic
+  `.eq()`/`.order()`/`.limit()` chains, but a very long chain or a big inline object
+  literal between them can push the real method out of range).
+- Two `.from()` calls close together, or a `.from()` nested inside `Promise.all([...])`,
+  are each attributed to the correct table/action — this was a specific risk given the
+  lookahead-window approach, and it holds up against real-world adjacent/nested chains.
+
 ## How it's different
 
 Most existing tools here are either general-purpose policy engines you write yourself
