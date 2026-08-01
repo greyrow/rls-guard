@@ -77,14 +77,36 @@ loop. Built in phases so each one ships independently:
    (300 chars) from each `.from(...)`, not a real parse — long chains or unusual
    formatting could misattribute. Worth a few adversarial test fixtures.
 
-**Phase 2 — HTML tracker report.** Render `AppScanReport` (the JSON from phase 1) as a
-single portable HTML file: findings grouped/sorted by risk, checkboxes per finding.
-Important constraint already flagged in review: static HTML can't persist checkbox
-state on its own (no server) — so the actual source of truth stays the JSON/YAML report
-file, and the HTML either (a) re-generates from an updated JSON each time an item is
-resolved, or (b) uses `localStorage` for local-only "I've reviewed this" state that
-doesn't survive across machines. Decide which before building; (a) is more consistent
-with "JSON is the source of truth."
+**Phase 2 — done.** HTML tracker report, built on the "JSON is truth, HTML is a pure
+render of it" decision (not `localStorage` — phase 3's GitHub issue and phase 4's
+`ship start` both need to read/write the same status, so a per-browser state store
+would fork into silently-disagreeing copies):
+- `src/types.ts` — `AppCrudFinding` gained `status: "open" | "resolved" | "wontfix"`,
+  `resolvedAt?`, `comment?`, and `detectedInLastScan` (false only for a resolved/wontfix
+  finding kept as a historical record after a re-scan no longer detects it at all).
+- `src/tools/scanReport.ts` — `mergeScanReport(freshFindings, priorReport)`: re-running
+  `scan` no longer blows away prior resolved/wontfix status. A finding carries its status
+  forward only if it's the *same issue* (same table+action **and** same risk level **and**
+  same summary) — if the risk level or summary changed, it resets to "open" even though
+  the table+action key matches (e.g. RLS got re-enabled, or the specific problem changed).
+  A resolved/wontfix finding that's no longer detected at all is kept with
+  `detectedInLastScan: false` rather than silently dropped (a human's recorded decision is
+  worth more than one stale entry); an "open" finding that disappears is just dropped, since
+  nobody made a decision on it worth preserving. Also has `applyResolution` for the
+  `resolve` command and `summarize` for recomputing risk counts.
+- `src/tools/renderHtml.ts` — `renderScanReportHtml`: static, self-contained HTML,
+  findings grouped by risk with status badges. No checkboxes, no JS, no client-side state.
+- `src/index.ts` — `scan --html [path]` writes the HTML alongside the JSON; a bare `scan`
+  (no `--html`) still re-renders an existing HTML file at the default path if one's
+  already there, so it can't silently go stale. New `scan resolve --table <t> --action <a>
+  --status <open|resolved|wontfix> [--comment <text>] [--report <path>]` edits the JSON in
+  place and re-renders the HTML the same way — this is also the exact primitive phase 4's
+  `ship start` loop will call once a fix is committed.
+- Found and fixed along the way: Commander enforces a *parent* command's
+  `.requiredOption()`s across its whole command chain, even when a child subcommand
+  (`scan resolve`) is what's actually being invoked — `scan`'s own `--app`/`--db` had to
+  become plain `.option()` with manual validation in the action, instead of
+  `.requiredOption()`, so `scan resolve` isn't blocked by `scan`'s unrelated requirements.
 
 **Phase 3 — `--create-issue`.** New flag/command that takes an `AppScanReport` and opens
 a GitHub issue via `gh issue create` with a markdown checklist mirroring the findings

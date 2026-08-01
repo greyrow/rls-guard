@@ -97,6 +97,8 @@ export function crossReference(
         recommendation: `Confirm "${table}" is the right table name (check for typos, or a non-"public" schema) and re-run the scan with --db pointed at the right database.`,
         callSites: sites,
         evidence: { rlsEnabled: false, hasPolicyForAction: false, policyUsesUnrestrictedUsing: false, specAllowsAction: specAllows },
+        status: "open",
+        detectedInLastScan: true,
       });
       continue;
     }
@@ -154,6 +156,8 @@ export function crossReference(
       recommendation,
       callSites: sites,
       evidence: { rlsEnabled, hasPolicyForAction: hasPolicy, policyUsesUnrestrictedUsing: unrestricted, specAllowsAction: specAllows },
+      status: "open",
+      detectedInLastScan: true,
     });
   }
 

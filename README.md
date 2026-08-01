@@ -69,6 +69,27 @@ source data for the HTML tracker report and `--create-issue` GitHub checklist pl
 next (see `PLAN.md`). Same heuristic tradeoff as `audit --no-ai`: regex-based call-site
 detection, not an AST parse — treat findings as "worth reviewing," not exhaustive.
 
+Add `--html` to also write a static HTML tracker (grouped by risk, with status badges):
+
+```bash
+npx tsx src/index.ts scan --app ./src --db $DATABASE_URL --html
+```
+
+Re-running `scan` merges with the existing report instead of overwriting it — a finding
+keeps its resolved/wontfix status across re-scans as long as it's still the *same issue*
+(same table+action, same risk level, same summary). If the risk level or summary changed,
+it resets to "open" even though the table+action matches, since it's not the same problem
+anymore. Mark a finding resolved (or won't-fix) directly, which also refreshes the HTML
+if one exists:
+
+```bash
+npx tsx src/index.ts scan resolve --table posts --action select --status resolved --comment "tightened the USING clause"
+```
+
+The JSON file is always the source of truth — the HTML is a pure render of it and never
+holds state of its own (no checkboxes, no `localStorage`); regenerate it via `scan` or
+`scan resolve` rather than editing it by hand.
+
 Known gaps in the call-site scanner (confirmed against real fixtures, not just claimed):
 - **Dynamic table names are invisible, not warned about.** `.from(tableVar)` or a template
   literal with interpolation (`` .from(`app_${env}`) ``) produce zero call sites — the

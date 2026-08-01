@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import "dotenv/config";
-import { writeFile } from "node:fs/promises";
+import { writeFile, readFile } from "node:fs/promises";
+import path from "node:path";
 import { Command } from "commander";
 import { loadSpec } from "./tools/spec.js";
 import { introspectSchema } from "./tools/schema.js";
@@ -9,7 +10,57 @@ import { runBaselineChecks } from "./tools/baselineAudit.js";
 import { dryRunSql } from "./tools/validate.js";
 import { scanAppCode } from "./tools/appScan.js";
 import { crossReference } from "./tools/crossReference.js";
-import type { AppScanReport, RiskLevel } from "./types.js";
+import { mergeScanReport, applyResolution, summarize } from "./tools/scanReport.js";
+import { renderScanReportHtml } from "./tools/renderHtml.js";
+import type { AppScanReport, FindingStatus } from "./types.js";
+
+async function loadScanReport(reportPath: string): Promise<AppScanReport | null> {
+  try {
+    return JSON.parse(await readFile(reportPath, "utf8")) as AppScanReport;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+function htmlPathFor(reportPath: string): string {
+  const { dir, name } = path.parse(reportPath);
+  return path.join(dir, `${name}.html`);
+}
+
+/**
+ * Writes the JSON report, then handles the HTML tracker: if `htmlPath` is given
+ * (an explicit --html value), always (re)write it there. Otherwise, if
+ * `renderHtmlIfExists` is set, check the conventional default path (same name,
+ * .html extension) and only re-render it if a file is already there — so the
+ * HTML never goes stale silently once it exists, without forcing every command
+ * to create one.
+ */
+async function writeScanReport(
+  reportPath: string,
+  report: AppScanReport,
+  opts: { htmlPath?: string; renderHtmlIfExists?: boolean } = {}
+) {
+  await writeFile(reportPath, JSON.stringify(report, null, 2) + "\n", "utf8");
+  console.log(`Wrote ${reportPath}`);
+
+  if (opts.htmlPath) {
+    await writeFile(opts.htmlPath, renderScanReportHtml(report), "utf8");
+    console.log(`Wrote ${opts.htmlPath}`);
+    return;
+  }
+
+  if (!opts.renderHtmlIfExists) return;
+  const defaultHtmlPath = htmlPathFor(reportPath);
+  const existed = await readFile(defaultHtmlPath, "utf8").then(
+    () => true,
+    () => false
+  );
+  if (existed) {
+    await writeFile(defaultHtmlPath, renderScanReportHtml(report), "utf8");
+    console.log(`Re-rendered ${defaultHtmlPath} (already existed — kept it in sync).`);
+  }
+}
 
 const program = new Command();
 
@@ -99,16 +150,26 @@ program
     }
   });
 
-program
+const scanCommand = program
   .command("scan")
   .description(
     "Scan an app's codebase for Supabase CRUD call sites and cross-reference them against live RLS state — a whole-app coverage audit, not just the database."
   )
-  .requiredOption("-a, --app <path>", "path to the app directory to scan")
-  .requiredOption("-d, --db <url>", "Postgres connection string")
+  // Not .requiredOption(): Commander enforces a parent command's mandatory
+  // options for the whole command chain, even when a subcommand (scan resolve)
+  // is what's actually being run — so these are validated by hand below instead.
+  .option("-a, --app <path>", "path to the app directory to scan")
+  .option("-d, --db <url>", "Postgres connection string")
   .option("-s, --spec <path>", "path to the YAML permission spec (optional — enables spec-mismatch findings)")
   .option("-o, --out <path>", "output file for the JSON scan report", "rls-guard.scan.json")
-  .action(async (opts: { app: string; db: string; spec?: string; out: string }) => {
+  .option("--html [path]", "also write a static HTML tracker (default: same name as --out with a .html extension)")
+  .action(async (opts: { app?: string; db?: string; spec?: string; out: string; html?: string | boolean }) => {
+    if (!opts.app || !opts.db) {
+      console.error("scan requires -a/--app <path> and -d/--db <url>.");
+      process.exitCode = 1;
+      return;
+    }
+
     console.log(`Scanning ${opts.app} for Supabase CRUD call sites...`);
     const callSites = await scanAppCode(opts.app);
     console.log(`Found ${callSites.length} call site(s).`);
@@ -123,10 +184,14 @@ program
 
     const spec = opts.spec ? await loadSpec(opts.spec) : null;
 
-    const findings = crossReference(callSites, liveSchema, spec);
+    const freshFindings = crossReference(callSites, liveSchema, spec);
 
-    const summary: Record<RiskLevel, number> = { critical: 0, high: 0, medium: 0, low: 0 };
-    for (const f of findings) summary[f.riskLevel]++;
+    const priorReport = await loadScanReport(opts.out);
+    if (priorReport) {
+      console.log(`Found an existing ${opts.out} — carrying forward resolved/wontfix status for unchanged findings.`);
+    }
+    const findings = mergeScanReport(freshFindings, priorReport);
+    const summary = summarize(findings);
 
     let databaseName = "unknown";
     try {
@@ -143,13 +208,15 @@ program
       summary,
     };
 
-    await writeFile(opts.out, JSON.stringify(report, null, 2) + "\n", "utf8");
-    console.log(`\nWrote ${opts.out}`);
+    await writeScanReport(opts.out, report, {
+      htmlPath: opts.html ? (typeof opts.html === "string" ? opts.html : htmlPathFor(opts.out)) : undefined,
+      renderHtmlIfExists: !opts.html,
+    });
 
     console.log(`\n== Summary ==`);
     console.log(`${summary.critical} critical, ${summary.high} high, ${summary.medium} medium, ${summary.low} informational`);
 
-    for (const f of findings.filter((f) => f.riskLevel === "critical" || f.riskLevel === "high")) {
+    for (const f of findings.filter((f) => f.status === "open" && (f.riskLevel === "critical" || f.riskLevel === "high"))) {
       console.log(`\n[${f.riskLevel.toUpperCase()}] ${f.table}.${f.action}`);
       console.log(`  ${f.summary}`);
       console.log(`  Fix: ${f.recommendation}`);
@@ -160,12 +227,53 @@ program
       console.log(`\nPass --spec <path> to also flag call sites that don't match your intended permission spec.`);
     }
 
-    if (summary.critical > 0 || summary.high > 0) {
-      console.log(`\n${opts.out} has the full findings list, including medium/low. Review before shipping.`);
+    const openCritical = findings.filter((f) => f.status === "open" && (f.riskLevel === "critical" || f.riskLevel === "high"));
+    if (openCritical.length > 0) {
+      console.log(`\n${opts.out} has the full findings list, including medium/low and resolved/wontfix. Review before shipping.`);
       process.exitCode = 1;
     } else {
-      console.log(`\nNo critical or high-risk findings. ${opts.out} has the full list for reference.`);
+      console.log(`\nNo open critical or high-risk findings. ${opts.out} has the full list for reference.`);
     }
+  });
+
+scanCommand
+  .command("resolve")
+  .description("Mark a scan finding's status (open/resolved/wontfix) in an existing scan report, and refresh its HTML tracker if one exists.")
+  .requiredOption("-t, --table <name>", "table name of the finding")
+  .requiredOption("-a, --action <crud>", "CRUD action of the finding: select, insert, update, or delete")
+  .requiredOption("-s, --status <status>", "new status: open, resolved, or wontfix")
+  .option("-c, --comment <text>", "optional comment explaining the resolution")
+  .option("-r, --report <path>", "path to the JSON scan report", "rls-guard.scan.json")
+  .action(async (opts: { table: string; action: string; status: string; comment?: string; report: string }) => {
+    if (!["open", "resolved", "wontfix"].includes(opts.status)) {
+      console.error(`Invalid --status "${opts.status}" — must be one of: open, resolved, wontfix.`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const report = await loadScanReport(opts.report);
+    if (!report) {
+      console.error(`${opts.report} doesn't exist yet — run "scan" first.`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const { report: updated, matched } = applyResolution(report, {
+      table: opts.table,
+      action: opts.action,
+      status: opts.status as FindingStatus,
+      comment: opts.comment,
+      resolvedAt: new Date().toISOString(),
+    });
+
+    if (matched === 0) {
+      console.error(`No finding found for ${opts.table}.${opts.action} in ${opts.report}. Check the table/action spelling.`);
+      process.exitCode = 1;
+      return;
+    }
+
+    await writeScanReport(opts.report, updated, { renderHtmlIfExists: true });
+    console.log(`Marked ${opts.table}.${opts.action} as "${opts.status}".`);
   });
 
 program.parseAsync(process.argv);

@@ -88,6 +88,8 @@ export type RiskLevel = "critical" | "high" | "medium" | "low";
 
 export type Urgency = "now" | "this_week" | "backlog";
 
+export type FindingStatus = "open" | "resolved" | "wontfix";
+
 /** One place in app code where a CRUD action is performed against a table. */
 export interface AppCrudCallSite {
   /** File path, relative to the scanned app directory. */
@@ -117,6 +119,16 @@ export interface AppCrudFinding {
     /** undefined if no spec was given, or the table isn't covered by the spec. */
     specAllowsAction?: boolean;
   };
+  /** Tracker state, carried forward across re-scans by table+action — see mergeScanReport. */
+  status: FindingStatus;
+  resolvedAt?: string;
+  comment?: string;
+  /**
+   * False only for a resolved/wontfix finding kept as a historical record after
+   * a re-scan no longer detects it at all (call site removed, condition fixed).
+   * Always true for a finding that was actually produced by the latest scan.
+   */
+  detectedInLastScan: boolean;
 }
 
 export interface AppScanReport {
