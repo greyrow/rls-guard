@@ -41,6 +41,12 @@ below is what's already built, and what to do next when you continue this in Cla
   handle multi-owner or team-based ownership (e.g. `organization_id` + membership table).
 - No CI/GitHub Action yet — that's the planned paid-tier hook, intentionally not built
   as part of the free core so the free/paid boundary stays clean from the start.
+- Spec has no way to declare *how* a role is actually resolved (e.g. an admin flag read
+  from a JWT custom claim like `app_metadata.is_admin`). `generate`/`audit`/`scan` can't
+  verify that kind of policy against intent — they only see the raw SQL, not what claim
+  shape it depends on. Not building this now (no real usage has hit it yet); if it comes
+  up, the shape would be a small per-role field like `admin: { via: jwt_claim, path:
+  app_metadata.is_admin, equals: true }`.
 
 ## v2: whole-app scan feature (phase 1 done, phases 2-5 next)
 
