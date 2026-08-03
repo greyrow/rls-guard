@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { AppSpec, LiveSchema } from "../types.js";
+import type { AppCrudFinding, AppSpec, LiveSchema } from "../types.js";
+import { bareTableName, findLiveTable } from "./crossReference.js";
 
 const MODEL = "claude-sonnet-4-5";
 
@@ -89,6 +90,65 @@ export async function generatePolicySql(spec: AppSpec, liveSchema: LiveSchema | 
 
   const text = extractText(message.content);
 
+  const match = text.match(/```sql\s*([\s\S]*?)```/);
+  return match ? match[1].trim() : text.trim();
+}
+
+const FIX_SYSTEM_PROMPT = `You are rls-guard, an expert Postgres/Supabase database security engineer.
+You are given ONE specific finding from an RLS coverage scan — a table, a CRUD action, a plain-English
+problem description, and (if available) that table's live columns and existing policies. Produce the
+SMALLEST SQL migration that fixes ONLY this finding:
+
+- If RLS is disabled on the table, enable it AND add a policy scoping this one action.
+- If a policy for this action is missing, add one.
+- If the existing policy for this action is unrestricted, alter or replace it to actually restrict access.
+
+Use "(select auth.uid())" wrapped in a sub-select for owner-column checks (Supabase convention — avoids
+the per-row re-evaluation performance trap). Infer a reasonable ownership column from the table's columns
+(e.g. "user_id", "owner_id", "created_by") if one exists. If no ownership column is obvious, fall back to
+restricting the policy to the "authenticated" role and add a SQL comment saying it likely needs a tighter,
+per-row scope once real ownership is known. Do not modify or add policies for any other table or action —
+only the one named in the finding. Add a one-line SQL comment above the change explaining what it does and
+why. Output ONLY the SQL in a single \`\`\`sql code block — no prose outside it.`;
+
+/**
+ * Generates the smallest SQL migration that fixes exactly one scan finding — used by
+ * `ship start` (phase 4). Scoped to a single table+action, not the whole spec, unlike
+ * generatePolicySql.
+ */
+export async function generateFindingFixSql(finding: AppCrudFinding, liveSchema: LiveSchema): Promise<string> {
+  const anthropic = client();
+
+  const liveTable = findLiveTable(liveSchema, finding.table);
+
+  const userContent = [
+    "## Finding",
+    "```json",
+    JSON.stringify(
+      {
+        table: bareTableName(finding.table),
+        action: finding.action,
+        summary: finding.summary,
+        recommendation: finding.recommendation,
+        evidence: finding.evidence,
+      },
+      null,
+      2
+    ),
+    "```",
+    liveTable
+      ? ["## Live table (columns + existing policies)", "```json", JSON.stringify(liveTable, null, 2), "```"].join("\n")
+      : "## Live table\nNo matching live table found in the introspected schema — fix based on the finding alone.",
+  ].join("\n\n");
+
+  const message = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 2048,
+    system: FIX_SYSTEM_PROMPT,
+    messages: [{ role: "user", content: userContent }],
+  });
+
+  const text = extractText(message.content);
   const match = text.match(/```sql\s*([\s\S]*?)```/);
   return match ? match[1].trim() : text.trim();
 }

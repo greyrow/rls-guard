@@ -13,6 +13,7 @@ function finding(overrides: Partial<AppCrudFinding>): AppCrudFinding {
     recommendation: "tighten it",
     callSites: [{ file: "a.ts", line: 1, table: "posts", action: "select", raw: "..." }],
     evidence: { rlsEnabled: true, hasPolicyForAction: true, policyUsesUnrestrictedUsing: true },
+    autoFixable: true,
     status: "open",
     detectedInLastScan: true,
     ...overrides,

@@ -25,6 +25,7 @@ test("RLS disabled is critical regardless of policies", () => {
   assert.equal(findings.length, 1);
   assert.equal(findings[0].riskLevel, "critical");
   assert.match(findings[0].summary, /row level security is OFF/);
+  assert.equal(findings[0].autoFixable, true);
 });
 
 test("RLS on but no matching policy is high", () => {
@@ -114,6 +115,7 @@ test("spec says action isn't granted anywhere is medium", () => {
   assert.equal(findings.length, 1);
   assert.equal(findings[0].riskLevel, "medium");
   assert.match(findings[0].summary, /doesn't grant update/);
+  assert.equal(findings[0].autoFixable, false);
 });
 
 test("clean case: restricted policy and spec allows it is low, and says so", () => {
@@ -165,6 +167,39 @@ test("table not found in live schema is medium", () => {
   assert.equal(findings.length, 1);
   assert.equal(findings[0].riskLevel, "medium");
   assert.match(findings[0].summary, /no table named "typo_table" was found/);
+  assert.equal(findings[0].autoFixable, false);
+});
+
+test("missing policy and unrestricted policy are both auto-fixable", () => {
+  const missingPolicy = crossReference([callSite({ action: "delete" })], { tables: [table({ policies: [] })] }, null);
+  assert.equal(missingPolicy[0].autoFixable, true);
+
+  const unrestricted = crossReference(
+    [callSite({ action: "select" })],
+    {
+      tables: [
+        table({ policies: [{ policyName: "p", command: "SELECT", roles: ["authenticated"], usingExpr: "true", withCheckExpr: null }] }),
+      ],
+    },
+    null
+  );
+  assert.equal(unrestricted[0].autoFixable, true);
+});
+
+test("clean/low-risk finding is not auto-fixable — nothing to fix", () => {
+  const findings = crossReference(
+    [callSite({ table: "posts", action: "select" })],
+    {
+      tables: [
+        table({
+          name: "posts",
+          policies: [{ policyName: "p", command: "SELECT", roles: ["authenticated"], usingExpr: "owner_id = auth.uid()", withCheckExpr: null }],
+        }),
+      ],
+    },
+    null
+  );
+  assert.equal(findings[0].autoFixable, false);
 });
 
 test("groups repeated call sites for the same table+action into one finding", () => {
