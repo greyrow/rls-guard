@@ -119,6 +119,13 @@ export interface AppCrudFinding {
     /** undefined if no spec was given, or the table isn't covered by the spec. */
     specAllowsAction?: boolean;
   };
+  /**
+   * True only for findings with one unambiguous SQL answer (RLS disabled, missing
+   * policy, unrestricted policy) — what `ship start` (phase 4) is allowed to
+   * auto-generate a fix for. False for findings that need human judgment (table not
+   * found, spec-vs-policy mismatch, or nothing wrong at all).
+   */
+  autoFixable: boolean;
   /** Tracker state, carried forward across re-scans by table+action — see mergeScanReport. */
   status: FindingStatus;
   resolvedAt?: string;

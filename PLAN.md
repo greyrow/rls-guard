@@ -151,14 +151,77 @@ re-run standalone e.g. to resync after a manual GitHub edit):
   body-file support were checked via `--help` before writing the code, which is likely
   why).
 
-**Phase 4 — `ship start` remediation loop (deferred, hardest/most novel).** Interactive
-Claude Code command: pick the next unchecked item from the issue, explain it in plain
-English, take user approval/adjustments/rejection, implement the fix, commit + push +
-open a PR, then mark the issue checkbox and the JSON/HTML tracker done with a comment
-explaining what changed. All git/GitHub operations via explicit `gh`/`git` script
-commands (no ambient auto-commit). Still open: whether this ships as a `gh extension`
-(installable in any repo) or a command inside this same TypeScript CLI — leaning CLI
-command for now, since it needs to share types/logic with `scan` directly.
+**Phase 4 — `ship start` remediation loop — done.** `rls-guard ship start`, a command
+inside this TypeScript CLI (not a separate `gh extension`, so it shares types/logic with
+`scan` directly). Run from inside the target app's own repo — same convention
+`scan create-issue` already relies on for `gh` to find the right remote.
+
+While scoping this (see git history for the full back-and-forth), reading how
+`crossReference.ts` actually derives its `recommendation` text surfaced an important
+correction to the original plan: almost every fixable finding's fix is a **database
+change** (enable RLS, add a policy, tighten a policy), not an app-code edit. So "the fix"
+is a SQL migration, generated and dry-run the same way `generate`/`dryRunSql` already
+work — not a generic code-editing agent. That reframing shaped everything below:
+
+- **Auto-fix scope:** `src/types.ts` — `AppCrudFinding` gained `autoFixable: boolean`,
+  set explicitly per branch in `crossReference.ts`. True for the three findings with one
+  unambiguous SQL answer (RLS disabled, missing policy, unrestricted policy). False for
+  "table not found" (no code fix possible), "spec vs. policy mismatch" (ambiguous which
+  side is wrong), and clean/low-risk findings (nothing to fix) — `ship start` never
+  offers these, they still show up in `scan`'s tracker as needing manual review.
+- **Fix generation:** `src/tools/claude.ts` — `generateFindingFixSql(finding, liveSchema)`,
+  a Claude call scoped to exactly one table+action (unlike `generatePolicySql`, which
+  covers a whole spec). Given the finding + that table's live columns/policies, returns
+  the smallest SQL migration that fixes just that finding.
+- **Loop, per finding** (`src/tools/shipRun.ts`, `runShipStart`): pick the next open
+  `autoFixable` finding → show `summary`/`recommendation`/call sites →
+  **approval checkpoint 1** (approve the plan, y/n) → generate the fix SQL → dry-run it
+  with `dryRunSql` (BEGIN...ROLLBACK against the live DB — the test gate, not an app test
+  suite) → **approval checkpoint 2** (approve the actual generated SQL, y/n, only shown
+  if the dry run passed) → on approval: write the migration file, `git checkout main`,
+  branch, commit, push, `gh pr create` (via new `createPr` in `githubIssue.ts`) targeting
+  `main` → mark the finding `resolved` (`applyResolution`, same primitive `scan resolve`
+  uses) → persist the JSON/HTML report immediately (`onFindingResolved` callback, so a
+  mid-session Ctrl-C never loses an already-shipped fix) → re-sync the GitHub tracker
+  issue (`syncScanIssue`) and comment on it with the PR link (new `commentOnIssue`).
+- **On rejection (either checkpoint) or a failed dry run:** left `open`, added to an
+  in-memory skip set so it's not offered again this session, but never persisted as
+  `wontfix` — re-running `ship start` later picks it back up. No retry-with-feedback loop.
+- **Never applies SQL to the live database.** The dry run is BEGIN/ROLLBACK only, same
+  guarantee `generate --db` gives — the committed migration file is what a human applies
+  through their normal deploy process. This was an explicit correction from the original
+  scoping pass, which had assumed `ship start` might apply fixes directly.
+- **PR granularity:** one PR per finding. **Base branch:** always `main` — no
+  `develop`/staging detection, that stays phase 5.
+- `src/tools/gitOps.ts` — new, minimal `git` wrapper (execFile, argv only, same pattern
+  as `githubIssue.ts`'s `gh` wrapper): `createBranch` (always forks from `main`),
+  `stageAndCommit`, `push`, `checkout`.
+- `src/index.ts` — `ship start` command: `--db` (required, schema context + dry run),
+  `--report`, `--migrations-dir` (default `migrations`), `--repo`.
+
+**Verified live**, not just unit tests: a throwaway Postgres container (with `authenticated`
+role and a stub `auth.uid()` added to emulate Supabase, since plain Postgres has neither)
+and a throwaway private repo (`greyrow/rls-guard-ship-test`) with one real
+`.from("items").select()` call site and RLS left off. Ran `scan` → `scan create-issue` →
+`ship start`, approving both checkpoints: generated a correct scoped policy migration,
+dry run passed, branch/commit/push/PR all happened for real
+([PR #2](https://github.com/greyrow/rls-guard-ship-test/pull/2)), the finding flipped to
+`resolved` with the PR link, and the tracker issue auto-closed with a comment. Matches
+the loop exactly as designed.
+
+**Known gaps:**
+- No automated test coverage for `shipRun.ts`'s interactive loop itself (readline +
+  git/gh/Claude side effects) — only the pure helpers (`nextFixableFinding`,
+  `migrationFilePath`) are unit-tested.
+- Assumes `git`/`gh` are already authenticated and the repo's default branch really is
+  `main` — no check for either. On this machine specifically, remember to
+  `gh auth switch --user achint-gupta-tech` before running this against `greyrow`-owned
+  repos (see the git-identity memory) — the active account can drift back to
+  `corriente-app` between commands, which fails the push/PR step with a
+  "repository not found" error (privately-owned repos 404 for accounts without access).
+- `ANTHROPIC_API_KEY` must be visible from wherever `ship start` is actually run (i.e. in
+  the target app repo's own `.env`, or exported in the shell) — `dotenv` resolves `.env`
+  relative to `cwd`, not relative to rls-guard's own install location.
 
 **Phase 5 — branch/merge automation (deferred, lowest risk).** If the repo has a
 `develop` branch, target PRs there instead of `main`, then a separate explicit

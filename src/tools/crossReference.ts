@@ -9,11 +9,11 @@ import type {
   Urgency,
 } from "../types.js";
 
-function bareTableName(tableName: string): string {
+export function bareTableName(tableName: string): string {
   return tableName.includes(".") ? tableName.split(".").pop()! : tableName;
 }
 
-function findLiveTable(schema: LiveSchema, tableName: string): LiveTable | undefined {
+export function findLiveTable(schema: LiveSchema, tableName: string): LiveTable | undefined {
   const bare = bareTableName(tableName);
   return schema.tables.find((t) => t.name === bare);
 }
@@ -97,6 +97,7 @@ export function crossReference(
         recommendation: `Confirm "${table}" is the right table name (check for typos, or a non-"public" schema) and re-run the scan with --db pointed at the right database.`,
         callSites: sites,
         evidence: { rlsEnabled: false, hasPolicyForAction: false, policyUsesUnrestrictedUsing: false, specAllowsAction: specAllows },
+        autoFixable: false, // no live table to generate a policy against
         status: "open",
         detectedInLastScan: true,
       });
@@ -111,27 +112,32 @@ export function crossReference(
     let urgency: Urgency;
     let summary: string;
     let recommendation: string;
+    let autoFixable: boolean;
 
     if (!rlsEnabled) {
       riskLevel = "critical";
       urgency = "now";
       summary = `App code calls .${action}() on "${table}", but row level security is OFF for this table — any request with table access can ${action} any row, regardless of who owns it.`;
       recommendation = `Enable RLS on "${table}" (ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY;) and add a policy that scopes ${action} to the right rows before relying on this in production.`;
+      autoFixable = true;
     } else if (!hasPolicy) {
       riskLevel = "high";
       urgency = "this_week";
       summary = `App code calls .${action}() on "${table}", but there's no ${action.toUpperCase()} (or ALL) policy on the table — this call will fail with a permission error for any non-superuser role.`;
       recommendation = `Add a ${action.toUpperCase()} policy for "${table}" that matches how the app actually uses it, or remove the call if it's dead code.`;
+      autoFixable = true;
     } else if (unrestricted) {
       riskLevel = "critical";
       urgency = "now";
       summary = `App code calls .${action}() on "${table}", and the matching policy has no real restriction (USING is empty or "true") — any authenticated caller can ${action} every row in the table.`;
       recommendation = `Tighten the policy's USING clause to scope it (e.g. to the row's owner column, or a role check) instead of leaving it unrestricted.`;
+      autoFixable = true;
     } else if (spec && specAllows === false) {
       riskLevel = "medium";
       urgency = "backlog";
       summary = `App code calls .${action}() on "${table}", but the permission spec doesn't grant ${action} to any role for this table — the live policy may be more permissive than intended.`;
       recommendation = `Reconcile the spec with the live policy: update the spec to reflect the intended ${action} access, or tighten the live policy to match the spec.`;
+      autoFixable = false; // ambiguous which side is wrong — needs a human call
     } else {
       riskLevel = "low";
       urgency = "backlog";
@@ -145,6 +151,7 @@ export function crossReference(
           : " Table isn't covered by the permission spec — nothing to compare against.";
       summary = `App code calls .${action}() on "${table}" — RLS is on and a scoped ${action.toUpperCase()} policy covers it.${specNote}`;
       recommendation = `No action needed — keep this as documented coverage in the tracker.`;
+      autoFixable = false; // nothing to fix
     }
 
     findings.push({
@@ -156,6 +163,7 @@ export function crossReference(
       recommendation,
       callSites: sites,
       evidence: { rlsEnabled, hasPolicyForAction: hasPolicy, policyUsesUnrestrictedUsing: unrestricted, specAllowsAction: specAllows },
+      autoFixable,
       status: "open",
       detectedInLastScan: true,
     });

@@ -79,3 +79,34 @@ export async function reopenIssue(number: number, comment: string, repo?: string
 export async function closeIssue(number: number, comment: string, repo?: string): Promise<void> {
   await execFileAsync("gh", ["issue", "close", String(number), "--comment", comment, "--reason", "completed", ...repoArgs(repo)]);
 }
+
+export async function commentOnIssue(number: number, body: string, repo?: string): Promise<void> {
+  await withBodyFile(body, (bodyFilePath) =>
+    execFileAsync("gh", ["issue", "comment", String(number), "--body-file", bodyFilePath, ...repoArgs(repo)])
+  );
+}
+
+export interface CreatePrOptions {
+  title: string;
+  body: string;
+  base: string;
+  repo?: string;
+}
+
+/** Used by `ship start` (phase 4) after a fix is committed and pushed. Returns the PR URL. */
+export async function createPr(opts: CreatePrOptions): Promise<string> {
+  const { stdout } = await withBodyFile(opts.body, (bodyFilePath) =>
+    execFileAsync("gh", [
+      "pr",
+      "create",
+      "--title",
+      opts.title,
+      "--body-file",
+      bodyFilePath,
+      "--base",
+      opts.base,
+      ...repoArgs(opts.repo),
+    ])
+  );
+  return stdout.trim();
+}

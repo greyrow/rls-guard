@@ -13,6 +13,7 @@ import { crossReference } from "./tools/crossReference.js";
 import { mergeScanReport, applyResolution, summarize } from "./tools/scanReport.js";
 import { renderScanReportHtml } from "./tools/renderHtml.js";
 import { syncScanIssue } from "./tools/issueSync.js";
+import { runShipStart } from "./tools/shipRun.js";
 import type { AppScanReport, FindingStatus } from "./types.js";
 
 async function loadScanReport(reportPath: string): Promise<AppScanReport | null> {
@@ -311,6 +312,48 @@ scanCommand
         console.log(`Updated and reopened issue #${result.issueNumber} — it had been closed but open findings remain.`);
         break;
     }
+  });
+
+const shipCommand = program
+  .command("ship")
+  .description("Remediation commands that act on a scan report — generate fixes and open PRs, not just report findings.");
+
+shipCommand
+  .command("start")
+  .description(
+    "Interactively walk through auto-fixable open findings: approve a plan, approve the generated SQL migration, then it commits/pushes/opens a PR. " +
+      "Run this from inside the target app's own repo (same convention as \"scan create-issue\") — git and gh operate on the current directory."
+  )
+  .requiredOption("-d, --db <url>", "Postgres connection string (for schema context and dry-running fixes)")
+  .option("-r, --report <path>", "path to the JSON scan report", "rls-guard.scan.json")
+  .option("-m, --migrations-dir <path>", "directory to write generated migration files into", "migrations")
+  .option("-R, --repo <owner/repo>", "target repo for PRs/issue comments (defaults to gh's own detection from the git remote)")
+  .action(async (opts: { db: string; report: string; migrationsDir: string; repo?: string }) => {
+    const report = await loadScanReport(opts.report);
+    if (!report) {
+      console.error(`${opts.report} doesn't exist yet — run "scan" first.`);
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log("Introspecting live schema...");
+    const liveSchema = await introspectSchema(opts.db);
+
+    const fixableCount = report.findings.filter((f) => f.status === "open" && f.autoFixable).length;
+    if (fixableCount === 0) {
+      console.log("No auto-fixable open findings in this report. Nothing to do.");
+      return;
+    }
+    console.log(`${fixableCount} auto-fixable open finding(s). Starting...`);
+
+    await runShipStart({
+      report,
+      liveSchema,
+      databaseUrl: opts.db,
+      migrationsDir: opts.migrationsDir,
+      repo: opts.repo,
+      onFindingResolved: (updated) => writeScanReport(opts.report, updated, { renderHtmlIfExists: true }),
+    });
   });
 
 program.parseAsync(process.argv);
